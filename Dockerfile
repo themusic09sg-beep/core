@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gettext \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
+        pdo_mysql \
         mysqli \
         mbstring \
         gd \
@@ -38,5 +39,16 @@ COPY . /app
 # Install PHP dependencies (vendor/)
 RUN composer install --no-dev --optimize-autoloader
 
+# HTTPS behind proxy shim: if the proxy says https, tell PHP/Gibbon it's HTTPS.
+# Railway/Render commonly send X-Forwarded-Proto: https
+RUN printf '%s\n' \
+'<?php' \
+'if (!empty($_SERVER["HTTP_X_FORWARDED_PROTO"]) && $_SERVER["HTTP_X_FORWARDED_PROTO"] === "https") {' \
+'  $_SERVER["HTTPS"] = "on";' \
+'  $_SERVER["SERVER_PORT"] = 443;' \
+'}' \
+'?>' \
+> /app/zzz_proxy_https.php
+
 # Start server
-CMD php -S 0.0.0.0:$PORT -t .
+CMD php -S 0.0.0.0:$PORT -t . zzz_proxy_https.php
