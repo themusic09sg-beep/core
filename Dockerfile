@@ -1,5 +1,9 @@
 FROM php:8.2-apache
 
+# --- Ensure ONLY prefork MPM is enabled (required for mod_php) ---
+RUN a2dismod mpm_event mpm_worker || true \
+ && a2enmod mpm_prefork
+
 # --- System dependencies for PHP extensions + common runtime needs ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng-dev \
