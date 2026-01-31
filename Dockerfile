@@ -1,6 +1,6 @@
 FROM php:8.2-apache
 
-# --- System dependencies for PHP extensions + composer ---
+# --- System dependencies for PHP extensions + tools ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpng-dev \
     libjpeg62-turbo-dev \
@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     git \
     ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/*
 
-# --- PHP extensions required by Gibbon ---
+# --- PHP extensions ---
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
  && docker-php-ext-install -j"$(nproc)" \
     gd \
@@ -26,16 +26,12 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     mysqli \
     opcache
 
-# --- Apache: enable rewrite + ensure ONLY ONE MPM (prefork) ---
+# --- Apache: enable rewrite + FORCE ONLY ONE MPM (prefork) ---
 RUN a2enmod rewrite \
  && a2dismod mpm_event mpm_worker || true \
  && a2enmod mpm_prefork
 
-# --- Apache: listen on Railway's dynamic PORT ---
-RUN sed -i 's/^Listen 80$/Listen ${PORT}/' /etc/apache2/ports.conf \
- && sed -i 's/<VirtualHost \*:80>/<VirtualHost \*:${PORT}>/' /etc/apache2/sites-available/000-default.conf
-
-# --- PHP recommended settings ---
+# --- PHP recommended settings (safe defaults) ---
 RUN { \
   echo "memory_limit=256M"; \
   echo "upload_max_filesize=64M"; \
@@ -44,9 +40,10 @@ RUN { \
   echo "date.timezone=UTC"; \
 } > /usr/local/etc/php/conf.d/gibbon.ini
 
-# --- OPcache for speed ---
+# --- OPcache (speed) ---
 RUN { \
   echo "opcache.enable=1"; \
+  echo "opcache.enable_cli=0"; \
   echo "opcache.memory_consumption=128"; \
   echo "opcache.interned_strings_buffer=16"; \
   echo "opcache.max_accelerated_files=20000"; \
@@ -58,16 +55,10 @@ RUN { \
 WORKDIR /var/www/html
 COPY . /var/www/html
 
-# --- Install Composer ---
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-
-# --- Install PHP dependencies (creates vendor/) ---
-RUN composer install --no-dev --optimize-autoloader || true
-
-# --- Railway volume mount point ---
+# --- Volume-backed storage ---
 RUN mkdir -p /data/uploads
 
-# --- Entrypoint: bind uploads + persist config.php in /data ---
+# --- Entrypoint: set PORT at runtime + MPM sanity + persist config/uploads ---
 RUN cat > /entrypoint.sh <<'SH'
 #!/bin/sh
 set -e
@@ -77,18 +68,28 @@ DATA_DIR="/data"
 
 mkdir -p "$DATA_DIR/uploads"
 
-# uploads -> /data/uploads
+# Force ONLY prefork MPM every boot (fixes "More than one MPM loaded")
+a2dismod mpm_event mpm_worker >/dev/null 2>&1 || true
+a2enmod mpm_prefork >/dev/null 2>&1 || true
+
+# Railway PORT fix (Apache does NOT expand ${PORT} in config files)
+if [ -n "${PORT:-}" ]; then
+  sed -i "s/^Listen .*/Listen ${PORT}/" /etc/apache2/ports.conf
+  sed -i "s/<VirtualHost \*:.*>/<VirtualHost *:${PORT}>/" /etc/apache2/sites-available/000-default.conf
+fi
+
+# Persist uploads via symlink into the volume
 if [ -e "$APP_DIR/uploads" ] && [ ! -L "$APP_DIR/uploads" ]; then
   rm -rf "$APP_DIR/uploads"
 fi
 ln -sfn "$DATA_DIR/uploads" "$APP_DIR/uploads"
 
-# restore config.php if persisted
+# Restore config.php from volume (so redeploys don't reset install)
 if [ -f "$DATA_DIR/config.php" ] && [ ! -f "$APP_DIR/config.php" ]; then
   cp "$DATA_DIR/config.php" "$APP_DIR/config.php"
 fi
 
-# persist config.php after installer creates it
+# If installer created config.php, persist it to volume
 if [ -f "$APP_DIR/config.php" ] && [ ! -f "$DATA_DIR/config.php" ]; then
   cp "$APP_DIR/config.php" "$DATA_DIR/config.php"
 fi
@@ -97,127 +98,6 @@ chown -R www-data:www-data "$DATA_DIR" || true
 
 exec apache2-foreground
 SH
-RUN chmod +x /entrypoint.sh
-
-ENTRYPOINT ["/entrypoint.sh"]  echo "post_max_size=64M"; \
-  echo "max_execution_time=120"; \
-  echo "max_input_vars=5000"; \
-  echo "date.timezone=UTC"; \
-} > /usr/local/etc/php/conf.d/gibbon.ini
-
-# --- OPcache (helps with performance) ---
-RUN { \
-  echo "opcache.enable=1"; \
-  echo "opcache.enable_cli=0"; \
-  echo "opcache.memory_consumption=128"; \
-  echo "opcache.interned_strings_buffer=16"; \
-  echo "opcache.max_accelerated_files=20000"; \
-  echo "opcache.validate_timestamps=1"; \
-  echo "opcache.revalidate_freq=60"; \
-} > /usr/local/etc/php/conf.d/opcache.ini
-
-# --- Apache: enable rewrite (Gibbon likes clean URLs) ---
-RUN a2enmod rewrite
-
-# --- App location ---
-WORKDIR /var/www/html
-
-# Copy your repo into the image
-COPY . /var/www/html
-
-# --- Persistent storage path (Railway volume should mount here) ---
-RUN mkdir -p /data/uploads
-
-# --- Entrypoint: link uploads to /data and persist/restore config.php ---
-RUN cat > /entrypoint.sh <<'SH'
-#!/bin/sh
-set -e
-
-APP_DIR="/var/www/html"
-DATA_DIR="/data"
-
-# Ensure data dirs exist
-mkdir -p "$DATA_DIR/uploads"
-
-# Make uploads persistent via symlink
-if [ -d "$APP_DIR/uploads" ] && [ ! -L "$APP_DIR/uploads" ]; then
-  rm -rf "$APP_DIR/uploads"
-fi
-ln -sfn "$DATA_DIR/uploads" "$APP_DIR/uploads"
-
-# Restore config.php if previously persisted
-if [ -f "$DATA_DIR/config.php" ] && [ ! -f "$APP_DIR/config.php" ]; then
-  cp "$DATA_DIR/config.php" "$APP_DIR/config.php"
-fi
-
-# If installer created config.php, persist it for future redeploys
-if [ -f "$APP_DIR/config.php" ] && [ ! -f "$DATA_DIR/config.php" ]; then
-  cp "$APP_DIR/config.php" "$DATA_DIR/config.php"
-fi
-
-# Permissions (apache user is www-data)
-chown -R www-data:www-data "$DATA_DIR" || true
-
-exec apache2-foreground
-SH
-
-RUN chmod +x /entrypoint.sh
-
-ENTRYPOINT ["/entrypoint.sh"]# --- OPcache ---
-RUN { \
-  echo "opcache.enable=1"; \
-  echo "opcache.enable_cli=0"; \
-  echo "opcache.memory_consumption=128"; \
-  echo "opcache.interned_strings_buffer=16"; \
-  echo "opcache.max_accelerated_files=20000"; \
-  echo "opcache.validate_timestamps=1"; \
-  echo "opcache.revalidate_freq=60"; \
-} > /usr/local/etc/php/conf.d/opcache.ini
-
-# --- Apache config for Railway ---
-RUN a2enmod rewrite \
- && sed -i 's/^Listen 80$/Listen ${PORT}/' /etc/apache2/ports.conf \
- && sed -i 's/<VirtualHost \*:80>/<VirtualHost \*:${PORT}>/' /etc/apache2/sites-available/000-default.conf
-
-WORKDIR /var/www/html
-
-# --- Copy app ---
-COPY . /var/www/html
-
-# --- Persistent storage ---
-RUN mkdir -p /data/uploads
-
-# --- Entrypoint ---
-RUN cat > /entrypoint.sh <<'SH'
-#!/bin/sh
-set -e
-
-APP_DIR="/var/www/html"
-DATA_DIR="/data"
-
-mkdir -p "$DATA_DIR/uploads"
-
-# Persist uploads
-if [ -d "$APP_DIR/uploads" ] && [ ! -L "$APP_DIR/uploads" ]; then
-  rm -rf "$APP_DIR/uploads"
-fi
-ln -sfn "$DATA_DIR/uploads" "$APP_DIR/uploads"
-
-# Restore config.php
-if [ -f "$DATA_DIR/config.php" ] && [ ! -f "$APP_DIR/config.php" ]; then
-  cp "$DATA_DIR/config.php" "$APP_DIR/config.php"
-fi
-
-# Persist config.php after install
-if [ -f "$APP_DIR/config.php" ] && [ ! -f "$DATA_DIR/config.php" ]; then
-  cp "$APP_DIR/config.php" "$DATA_DIR/config.php"
-fi
-
-chown -R www-data:www-data "$DATA_DIR" || true
-
-exec apache2-foreground
-SH
-
 RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
