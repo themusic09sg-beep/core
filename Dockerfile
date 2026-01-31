@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# --- PHP extensions ---
+# --- PHP extensions required by Gibbon (and common modules) ---
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
  && docker-php-ext-install -j"$(nproc)" \
     gd \
@@ -26,13 +26,17 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
     mysqli \
     opcache
 
-# --- Apache: enable rewrite + FORCE ONLY ONE MPM (prefork) ---
+# --- Apache: enable rewrite + ensure ONLY ONE MPM (prefork) ---
 RUN a2enmod rewrite \
- && a2dismod mpm_event mpm_worker || true \
+ && a2dismod mpm_event mpm_worker >/dev/null 2>&1 || true \
  && a2enmod mpm_prefork
 
- RUN echo "ServerName localhost" > /etc/apache2/conf-available/servername.conf \
+# --- Apache: silence ServerName warning ---
+RUN echo "ServerName localhost" > /etc/apache2/conf-available/servername.conf \
  && a2enconf servername
+
+# --- Composer (for vendor/autoload.php) ---
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 # --- PHP recommended settings (safe defaults) ---
 RUN { \
@@ -58,10 +62,15 @@ RUN { \
 WORKDIR /var/www/html
 COPY . /var/www/html
 
+# --- Install PHP dependencies (creates vendor/) ---
+# If your repo already includes vendor/, this is still fine.
+RUN composer install --no-dev --optimize-autoloader
+
 # --- Volume-backed storage ---
+# Railway Volume should be mounted at /data in Railway settings
 RUN mkdir -p /data/uploads
 
-# --- Entrypoint: set PORT at runtime + MPM sanity + persist config/uploads ---
+# --- Entrypoint: PORT fix + MPM sanity + persist config/uploads ---
 RUN cat > /entrypoint.sh <<'SH'
 #!/bin/sh
 set -e
@@ -101,6 +110,6 @@ chown -R www-data:www-data "$DATA_DIR" || true
 
 exec apache2-foreground
 SH
-RUN chmod +x /entrypoint.sh
 
+RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
