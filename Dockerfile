@@ -31,6 +31,9 @@ RUN a2enmod rewrite \
  && a2dismod mpm_event mpm_worker || true \
  && a2enmod mpm_prefork
 
+ RUN echo "ServerName localhost" > /etc/apache2/conf-available/servername.conf \
+ && a2enconf servername
+
 # --- PHP recommended settings (safe defaults) ---
 RUN { \
   echo "memory_limit=256M"; \
