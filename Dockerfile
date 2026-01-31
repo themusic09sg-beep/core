@@ -35,6 +35,13 @@ RUN a2enmod rewrite \
 RUN echo "ServerName localhost" > /etc/apache2/conf-available/servername.conf \
  && a2enconf servername
 
+# --- Trust Railway HTTPS proxy ---
+RUN echo '\
+SetEnvIf X-Forwarded-Proto "https" HTTPS=on\n\
+RequestHeader set X-Forwarded-Proto "https" env=HTTPS\n\
+' > /etc/apache2/conf-available/railway-https.conf \
+ && a2enconf railway-https
+ 
 # --- Composer (for vendor/autoload.php) ---
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
