@@ -45,6 +45,68 @@ RUN { \
   echo "opcache.revalidate_freq=60"; \
 } > /usr/local/etc/php/conf.d/opcache.ini
 
+# --- Apache: enable rewrite ---
+RUN a2enmod rewrite
+
+# Trust Railway proxy for HTTPS detection (so Gibbon can see HTTPS)
+RUN { \
+  echo "SetEnvIf X-Forwarded-Proto https HTTPS=on"; \
+  echo "RequestHeader set X-Forwarded-Proto \"https\" env=HTTPS"; \
+} > /etc/apache2/conf-available/railway-proxy.conf \
+ && a2enconf railway-proxy
+
+# --- App location ---
+WORKDIR /var/www/html
+
+# Copy your repo into the image
+COPY . /var/www/html
+
+# --- Persistent storage for Railway volume ---
+RUN mkdir -p /data/uploads
+
+# Entrypoint: restore config/uploads from /data, and persist config after install
+RUN cat > /entrypoint.sh <<'SH' \
+#!/bin/sh
+set -e
+
+APP_DIR="/var/www/html"
+DATA_DIR="/data"
+
+mkdir -p "$DATA_DIR/uploads"
+
+# Persist uploads directory
+if [ -d "$APP_DIR/uploads" ] && [ ! -L "$APP_DIR/uploads" ]; then
+  rm -rf "$APP_DIR/uploads"
+fi
+ln -sfn "$DATA_DIR/uploads" "$APP_DIR/uploads"
+
+# Restore config.php if we have it persisted
+if [ -f "$DATA_DIR/config.php" ] && [ ! -f "$APP_DIR/config.php" ]; then
+  cp "$DATA_DIR/config.php" "$APP_DIR/config.php"
+fi
+
+# If installer created config.php, persist it for future redeploys
+if [ -f "$APP_DIR/config.php" ] && [ ! -f "$DATA_DIR/config.php" ]; then
+  cp "$APP_DIR/config.php" "$DATA_DIR/config.php"
+fi
+
+chown -R www-data:www-data "$DATA_DIR" || true
+
+exec apache2-foreground
+SH
+ && chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]# --- OPcache (helps speed a lot) ---
+RUN { \
+  echo "opcache.enable=1"; \
+  echo "opcache.enable_cli=0"; \
+  echo "opcache.memory_consumption=128"; \
+  echo "opcache.interned_strings_buffer=16"; \
+  echo "opcache.max_accelerated_files=20000"; \
+  echo "opcache.validate_timestamps=1"; \
+  echo "opcache.revalidate_freq=60"; \
+} > /usr/local/etc/php/conf.d/opcache.ini
+
 # --- Apache: use Railway PORT + enable rewrite ---
 RUN a2enmod rewrite \
  && sed -i 's/^Listen 80$/Listen ${PORT}/' /etc/apache2/ports.conf \
